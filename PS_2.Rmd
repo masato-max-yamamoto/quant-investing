@@ -7,4 +7,121 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+library(frenchdata)
+library(tidyverse)
+library(tidyquant)
+
+raw_ff_factor <- download_french_data("Fama/French 5 Factors (2x3)")
+dat_ff <- 
+  raw_ff_factor$subsets$data[[1]] |> tibble() |> 
+  mutate(date = ceiling_date(ym(date),"month") - 1)
+
+raw_industry <- download_french_data("49 Industry Portfolios")
+dat_industry <- 
+  raw_industry$subsets$data[[1]] |>
+  tibble() |> 
+  mutate(date = ceiling_date(ym(date), "month") - 1) |>
+  mutate_all( ~ if_else(. == -99.99, NA, .))
+
+dat_industry <- 
+  dat_industry |> 
+  select(date, sort(names(dat_industry)[-1])) |> 
+  mutate_if(is.numeric, ~./100)
 ```
+
+# Minimum Variance Portfolio and Tangency Portfolio
+## Find weights for Minimum Variance Portfolio and Tangency Portfolio
+```{r}
+find_weights <- function(dat_industry){
+  var_mat <- 
+    dat_industry |> 
+    select(-date) |> 
+    var(na.rm = TRUE) |> 
+    as.matrix()
+  
+  var_mat_inv <- solve(var_mat)
+  
+  e_r <- 
+    dat_industry |> 
+    pivot_longer(cols = -date) |> 
+    group_by(name) |> 
+    summarise(e_r = mean(value, na.rm = TRUE))
+  
+  e_r_vec <- 
+    e_r |> 
+    pull(e_r) 
+  
+  rf <- 
+    mean(dat_ff$RF)
+  
+  ones <- rep(1, nrow(var_mat))
+  
+  w_mvp <- var_mat_inv %*% ones / (ones %*% var_mat_inv %*% ones)[1]
+  w_tangency <- var_mat_inv %*% (e_r_vec - rf) / (ones %*% var_mat_inv %*% (e_r_vec - rf))[1]
+  
+  ports_stats <- 
+    e_r |> 
+    left_join(diag(var_mat) |> sqrt() |> enframe(value = "std"),
+              by = "name") 
+  
+  results <- list(w_mvp, w_tangency, ports_stats, var_mat, e_r, rf)
+  names(results) <- c("w_mvp", "w_tangency", "stats", "v", "e_r", "rf")
+  return(results)
+}
+results <- find_weights(dat_industry)
+```
+
+
+```{r}
+results$stats |> 
+  ggplot() + 
+  aes(x = std, y = e_r) +
+  geom_point() +
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_continuous(labels = scales::percent)
+```
+
+```{r}
+target <- 0.01
+step <- 100
+
+calc_mv <- function(target, results){
+  r_vec <- results$e_r |> pull(e_r)
+  one_vec <- rep(1, nrow(results$v))
+  a <- t(r_vec) %*% solve(results$v) %*% r_vec
+  b <- t(one_vec) %*% solve(results$v) %*% r_vec
+  c <- t(one_vec) %*% solve(results$v) %*% one_vec
+  
+  sigma_mvp <- ((a - 2 * b * target + c * (target^2) ) /
+                  (a * c - b^2) ) ^ (1 / 2)
+  return(sigma_mvp[1])
+}
+
+frontier <- 
+  seq(min(results$e_r$e_r),
+      max(results$e_r$e_r),
+      (max(results$e_r$e_r) - min(results$e_r$e_r))/step) |> 
+  enframe() |> 
+  rename(e_r = "value") |> 
+  mutate(std = map_dbl(e_r, ~calc_mv(., results)),
+         name = "frontier") 
+
+frontier |> 
+  bind_rows(results$stats) |> 
+  ggplot(aes(x = std, y = e_r)) +
+  geom_point(data = \(x) x |> filter(name == "frontier"), color = "orange")  +
+  geom_point(data = \(x) x |> filter(name != "frontier"), color = "black")  +
+  labs(title = "efficient frontier vs individual portfolios") +
+  scale_y_continuous(labels = scales::percent, limits = c(0, NA)) +
+  scale_x_continuous(labels = scales::percent, limits = c(0, NA)) 
+
+```
+
+# Reproduce Jorion (1991)
+Why do people not use this approach? Because it's unstable and extream!
+
+```{r}
+
+```
+
+
